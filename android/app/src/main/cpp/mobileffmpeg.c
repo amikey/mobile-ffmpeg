@@ -49,6 +49,7 @@
 #include "libavutil/bprint.h"
 #include "fftools_ffmpeg.h"
 #include "mobileffmpeg.h"
+#include "mobileffmpeg_exception.h"
 
 /** Callback data structure */
 struct CallbackData {
@@ -67,6 +68,8 @@ struct CallbackData {
 
   struct CallbackData *next;
 };
+
+__thread jmp_buf ex_buf__;
 
 /** Redirection control variables */
 pthread_mutex_t lockMutex;

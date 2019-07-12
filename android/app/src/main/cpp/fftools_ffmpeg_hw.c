@@ -17,6 +17,10 @@
  */
 
 /*
+ * CHANGES 07.2019
+ * --------------------------------------------------------
+ * - concurrent execution support added
+ *
  * CHANGES 08.2018
  * --------------------------------------------------------
  * - fftools_ prefix added to file name and parent header
@@ -28,8 +32,8 @@
 
 #include "fftools_ffmpeg.h"
 
-static int nb_hw_devices;
-static HWDevice **hw_devices;
+static __thread int nb_hw_devices;
+static __thread HWDevice **hw_devices;
 
 static HWDevice *hw_device_get_by_type(enum AVHWDeviceType type)
 {

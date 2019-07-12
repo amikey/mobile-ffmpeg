@@ -20,6 +20,10 @@
  */
 
 /*
+ * CHANGES 07.2019
+ * --------------------------------------------------------
+ * - concurrent execution support added
+ *
  * CHANGES 08.2018
  * --------------------------------------------------------
  * - fftools_ prefix added to file name and parent header
@@ -83,17 +87,17 @@
 #include <windows.h>
 #endif
 
-static int init_report(const char *env);
+static int init_report(const char *env, const OptionDef **options);
 extern void mobileffmpeg_log_callback_function(void *ptr, int level, const char* format, va_list vargs);
 
-AVDictionary *sws_dict;
-AVDictionary *swr_opts;
-AVDictionary *format_opts, *codec_opts, *resample_opts;
+__thread AVDictionary *sws_dict;
+__thread AVDictionary *swr_opts;
+__thread AVDictionary *format_opts, *codec_opts, *resample_opts;
 
-static FILE *report_file;
-static int report_file_level = AV_LOG_DEBUG;
-int hide_banner = 0;
-int longjmp_value = 0;
+static __thread FILE *report_file;
+static __thread int report_file_level = AV_LOG_DEBUG;
+__thread int hide_banner = 0;
+__thread int longjmp_value = 0;
 
 enum show_muxdemuxers {
     SHOW_DEFAULT,
@@ -175,14 +179,14 @@ int64_t parse_time_or_die(const char *context, const char *timestr,
     return us;
 }
 
-void show_help_options(const OptionDef *options, const char *msg, int req_flags,
+void show_help_options(const OptionDef **options, const char *msg, int req_flags,
                        int rej_flags, int alt_flags)
 {
-    const OptionDef *po;
     int first;
 
     first = 1;
-    for (po = options; po->name; po++) {
+    for (int i = 0; options[i] && options[i]->name; i++) {
+        const OptionDef *po = options[i];
         char buf[64];
 
         if (((po->flags & req_flags) != req_flags) ||
@@ -216,17 +220,18 @@ void show_help_children(const AVClass *class, int flags)
         show_help_children(child, flags);
 }
 
-static const OptionDef *find_option(const OptionDef *po, const char *name)
+static const OptionDef *find_option(const OptionDef **options, const char *name)
 {
+    int i = 0;
     const char *p = strchr(name, ':');
     int len = p ? p - name : strlen(name);
 
-    while (po->name) {
-        if (!strncmp(name, po->name, len) && strlen(po->name) == len)
+    while (options[i] && options[i]->name) {
+        if (!strncmp(name, options[i]->name, len) && strlen(options[i]->name) == len)
             break;
-        po++;
+        i++;
     }
-    return po;
+    return options[i];
 }
 
 /* _WIN32 means using the windows libc - cygwin doesn't define that
@@ -235,8 +240,8 @@ static const OptionDef *find_option(const OptionDef *po, const char *name)
 #if HAVE_COMMANDLINETOARGVW && defined(_WIN32)
 #include <shellapi.h>
 /* Will be leaked on exit */
-static char** win32_argv_utf8 = NULL;
-static int win32_argc = 0;
+static __thread char** win32_argv_utf8 = NULL;
+static __thread int win32_argc = 0;
 
 /**
  * Prepare command line arguments for executable.
@@ -294,7 +299,7 @@ static inline void prepare_app_arguments(int *argc_ptr, char ***argv_ptr)
 #endif /* HAVE_COMMANDLINETOARGVW */
 
 static int write_option(void *optctx, const OptionDef *po, const char *opt,
-                        const char *arg)
+                        const char *arg, const OptionDef **options)
 {
     /* new-style options contain an offset into optctx, old-style address of
      * a global var*/
@@ -334,7 +339,7 @@ static int write_option(void *optctx, const OptionDef *po, const char *opt,
     } else if (po->flags & OPT_DOUBLE) {
         *(double *)dst = parse_number_or_die(opt, arg, OPT_DOUBLE, -INFINITY, INFINITY);
     } else if (po->u.func_arg) {
-        int ret = po->u.func_arg(optctx, opt, arg);
+        int ret = po->u.func_arg(optctx, opt, arg, options);
         if (ret < 0) {
             av_log(NULL, AV_LOG_ERROR,
                    "Failed to set value '%s' for option '%s': %s\n",
@@ -348,8 +353,7 @@ static int write_option(void *optctx, const OptionDef *po, const char *opt,
     return 0;
 }
 
-int parse_option(void *optctx, const char *opt, const char *arg,
-                 const OptionDef *options)
+int parse_option(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     const OptionDef *po;
     int ret;
@@ -374,14 +378,14 @@ int parse_option(void *optctx, const char *opt, const char *arg,
         return AVERROR(EINVAL);
     }
 
-    ret = write_option(optctx, po, opt, arg);
+    ret = write_option(optctx, po, opt, arg, options);
     if (ret < 0)
         return ret;
 
     return !!(po->flags & HAS_ARG);
 }
 
-void parse_options(void *optctx, int argc, char **argv, const OptionDef *options,
+void parse_options(void *optctx, int argc, char **argv, const OptionDef **options,
                    void (*parse_arg_function)(void *, const char*))
 {
     const char *opt;
@@ -414,7 +418,7 @@ void parse_options(void *optctx, int argc, char **argv, const OptionDef *options
     }
 }
 
-int parse_optgroup(void *optctx, OptionGroup *g)
+int parse_optgroup(void *optctx, OptionGroup *g, const OptionDef **options)
 {
     int i, ret;
 
@@ -437,7 +441,7 @@ int parse_optgroup(void *optctx, OptionGroup *g)
         av_log(NULL, AV_LOG_DEBUG, "Applying option %s (%s) with argument %s.\n",
                o->key, o->opt->help, o->val);
 
-        ret = write_option(optctx, o->opt, o->key, o->val);
+        ret = write_option(optctx, o->opt, o->key, o->val, options);
         if (ret < 0)
             return ret;
     }
@@ -447,7 +451,7 @@ int parse_optgroup(void *optctx, OptionGroup *g)
     return 0;
 }
 
-int locate_option(int argc, char **argv, const OptionDef *options,
+int locate_option(int argc, char **argv, const OptionDef **options,
                   const char *optname)
 {
     const OptionDef *po;
@@ -497,16 +501,18 @@ static void dump_argument(const char *a)
     fputc('"', report_file);
 }
 
-static void check_options(const OptionDef *po)
+static void check_options(const OptionDef **options)
 {
-    while (po->name) {
-        if (po->flags & OPT_PERFILE)
-            av_assert0(po->flags & (OPT_INPUT | OPT_OUTPUT));
-        po++;
+    int i = 0;
+
+    while (options[i] && options[i]->name) {
+        if (options[i]->flags & OPT_PERFILE)
+            av_assert0(options[i]->flags & (OPT_INPUT | OPT_OUTPUT));
+        i++;
     }
 }
 
-void parse_loglevel(int argc, char **argv, const OptionDef *options)
+void parse_loglevel(int argc, char **argv, const OptionDef **options)
 {
     int idx = locate_option(argc, argv, options, "loglevel");
     const char *env;
@@ -516,10 +522,10 @@ void parse_loglevel(int argc, char **argv, const OptionDef *options)
     if (!idx)
         idx = locate_option(argc, argv, options, "v");
     if (idx && (idx + 1 < argc) && argv[idx + 1])
-        opt_loglevel(NULL, "loglevel", argv[idx + 1]);
+        opt_loglevel(NULL, "loglevel", argv[idx + 1], options);
     idx = locate_option(argc, argv, options, "report");
     if ((env = getenv("FFREPORT")) || idx) {
-        init_report(env);
+        init_report(env, options);
         if (report_file) {
             int i;
             fprintf(report_file, "Command line:\n");
@@ -754,7 +760,7 @@ void uninit_parse_context(OptionParseContext *octx)
 }
 
 int split_commandline(OptionParseContext *octx, int argc, char *argv[],
-                      const OptionDef *options,
+                      const OptionDef **options,
                       const OptionGroupDef *groups, int nb_groups)
 {
     int optindex = 1;
@@ -806,7 +812,7 @@ do {                                                                           \
 
         /* normal options */
         po = find_option(options, opt);
-        if (po->name) {
+        if (po && po->name) {
             if (po->flags & OPT_EXIT) {
                 /* optional argument, e.g. -h */
                 if (optindex < argc) {
@@ -864,7 +870,7 @@ do {                                                                           \
     return 0;
 }
 
-int opt_cpuflags(void *optctx, const char *opt, const char *arg)
+int opt_cpuflags(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     int ret;
     unsigned flags = av_get_cpu_flags();
@@ -876,7 +882,7 @@ int opt_cpuflags(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-int opt_loglevel(void *optctx, const char *opt, const char *arg)
+int opt_loglevel(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     const struct { const char *name; int level; } log_levels[] = {
         { "quiet"  , AV_LOG_QUIET   },
@@ -983,7 +989,7 @@ static void expand_filename_template(AVBPrint *bp, const char *template,
     }
 }
 
-static int init_report(const char *env)
+static int init_report(const char *env, const OptionDef **options)
 {
     char *filename_template = NULL;
     char *key, *val;
@@ -1054,12 +1060,12 @@ static int init_report(const char *env)
     return 0;
 }
 
-int opt_report(const char *opt)
+int opt_report(const char *opt, const OptionDef **options)
 {
-    return init_report(NULL);
+    return init_report(NULL, options);
 }
 
-int opt_max_alloc(void *optctx, const char *opt, const char *arg)
+int opt_max_alloc(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     char *tail;
     size_t max;
@@ -1073,7 +1079,7 @@ int opt_max_alloc(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-int opt_timelimit(void *optctx, const char *opt, const char *arg)
+int opt_timelimit(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
 #if HAVE_SETRLIMIT
     int lim = parse_number_or_die(opt, arg, OPT_INT64, 0, INT_MAX);
@@ -1096,7 +1102,7 @@ void print_error(const char *filename, int err)
     av_log(NULL, AV_LOG_ERROR, "%s: %s\n", filename, errbuf_ptr);
 }
 
-static int warned_cfg = 0;
+static __thread int warned_cfg = 0;
 
 #define INDENT        1
 #define SHOW_VERSION  2
@@ -1157,7 +1163,7 @@ static void print_program_info(int flags, int level)
     av_log(NULL, level, "%sconfiguration: " FFMPEG_CONFIGURATION "\n", indent);
 }
 
-static void print_buildconf(int flags, int level)
+static void print_buildconf(int flags, int level, const OptionDef **options)
 {
     const char *indent = flags & INDENT ? "  " : "";
     char str[] = { FFMPEG_CONFIGURATION };
@@ -1183,7 +1189,7 @@ static void print_buildconf(int flags, int level)
     }
 }
 
-void show_banner(int argc, char **argv, const OptionDef *options)
+void show_banner(int argc, char **argv, const OptionDef **options)
 {
     int idx = locate_option(argc, argv, options, "version");
     if (hide_banner || idx)
@@ -1194,7 +1200,7 @@ void show_banner(int argc, char **argv, const OptionDef *options)
     print_all_libs_info(INDENT|SHOW_VERSION, AV_LOG_INFO);
 }
 
-int show_version(void *optctx, const char *opt, const char *arg)
+int show_version(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     av_log_set_callback(mobileffmpeg_log_callback_function);
     print_program_info (SHOW_COPYRIGHT, AV_LOG_INFO);
@@ -1203,15 +1209,15 @@ int show_version(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-int show_buildconf(void *optctx, const char *opt, const char *arg)
+int show_buildconf(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     av_log_set_callback(mobileffmpeg_log_callback_function);
-    print_buildconf      (INDENT|0, AV_LOG_INFO);
+    print_buildconf(INDENT|0, AV_LOG_INFO, options);
 
     return 0;
 }
 
-int show_license(void *optctx, const char *opt, const char *arg)
+int show_license(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
 #if CONFIG_NONFREE
     av_log(NULL, AV_LOG_INFO,
@@ -1355,22 +1361,22 @@ static int show_formats_devices(void *optctx, const char *opt, const char *arg, 
     return 0;
 }
 
-int show_formats(void *optctx, const char *opt, const char *arg)
+int show_formats(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     return show_formats_devices(optctx, opt, arg, 0, SHOW_DEFAULT);
 }
 
-int show_muxers(void *optctx, const char *opt, const char *arg)
+int show_muxers(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     return show_formats_devices(optctx, opt, arg, 0, SHOW_MUXERS);
 }
 
-int show_demuxers(void *optctx, const char *opt, const char *arg)
+int show_demuxers(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     return show_formats_devices(optctx, opt, arg, 0, SHOW_DEMUXERS);
 }
 
-int show_devices(void *optctx, const char *opt, const char *arg)
+int show_devices(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     return show_formats_devices(optctx, opt, arg, 1, SHOW_DEFAULT);
 }
@@ -1552,7 +1558,7 @@ static void print_codecs_for_id(enum AVCodecID id, int encoder)
     av_log(NULL, AV_LOG_INFO, ")");
 }
 
-int show_codecs(void *optctx, const char *opt, const char *arg)
+int show_codecs(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     const AVCodecDescriptor **codecs;
     unsigned i, nb_codecs = get_codecs_sorted(&codecs);
@@ -1645,19 +1651,19 @@ static void print_codecs(int encoder)
     av_free(codecs);
 }
 
-int show_decoders(void *optctx, const char *opt, const char *arg)
+int show_decoders(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     print_codecs(0);
     return 0;
 }
 
-int show_encoders(void *optctx, const char *opt, const char *arg)
+int show_encoders(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     print_codecs(1);
     return 0;
 }
 
-int show_bsfs(void *optctx, const char *opt, const char *arg)
+int show_bsfs(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     const AVBitStreamFilter *bsf = NULL;
     void *opaque = NULL;
@@ -1669,7 +1675,7 @@ int show_bsfs(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-int show_protocols(void *optctx, const char *opt, const char *arg)
+int show_protocols(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     void *opaque = NULL;
     const char *name;
@@ -1684,7 +1690,7 @@ int show_protocols(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-int show_filters(void *optctx, const char *opt, const char *arg)
+int show_filters(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
 #if CONFIG_AVFILTER
     const AVFilter *filter = NULL;
@@ -1731,7 +1737,7 @@ int show_filters(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-int show_colors(void *optctx, const char *opt, const char *arg)
+int show_colors(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     const char *name;
     const uint8_t *rgb;
@@ -1745,7 +1751,7 @@ int show_colors(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-int show_pix_fmts(void *optctx, const char *opt, const char *arg)
+int show_pix_fmts(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     const AVPixFmtDescriptor *pix_desc = NULL;
 
@@ -1778,7 +1784,7 @@ int show_pix_fmts(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-int show_layouts(void *optctx, const char *opt, const char *arg)
+int show_layouts(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     int i = 0;
     uint64_t layout, j;
@@ -1807,7 +1813,7 @@ int show_layouts(void *optctx, const char *opt, const char *arg)
     return 0;
 }
 
-int show_sample_fmts(void *optctx, const char *opt, const char *arg)
+int show_sample_fmts(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     int i;
     char fmt_str[128];
@@ -1977,7 +1983,7 @@ static void show_help_bsf(const char *name)
         show_help_children(bsf->priv_class, AV_OPT_FLAG_BSF_PARAM);
 }
 
-int show_help(void *optctx, const char *opt, const char *arg)
+int show_help(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     char *topic, *par;
     av_log_set_callback(mobileffmpeg_log_callback_function);
@@ -1990,7 +1996,7 @@ int show_help(void *optctx, const char *opt, const char *arg)
         *par++ = 0;
 
     if (!*topic) {
-        show_help_default(topic, par);
+        show_help_default(topic, par, options);
     } else if (!strcmp(topic, "decoder")) {
         show_help_codec(par, 0);
     } else if (!strcmp(topic, "encoder")) {
@@ -2006,7 +2012,7 @@ int show_help(void *optctx, const char *opt, const char *arg)
     } else if (!strcmp(topic, "bsf")) {
         show_help_bsf(par);
     } else {
-        show_help_default(topic, par);
+        show_help_default(topic, par, options);
     }
 
     av_freep(&topic);
@@ -2280,7 +2286,7 @@ static int show_sinks_sources_parse_arg(const char *arg, char **dev, AVDictionar
     return 0;
 }
 
-int show_sources(void *optctx, const char *opt, const char *arg)
+int show_sources(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     AVInputFormat *fmt = NULL;
     char *dev = NULL;
@@ -2318,7 +2324,7 @@ int show_sources(void *optctx, const char *opt, const char *arg)
     return ret;
 }
 
-int show_sinks(void *optctx, const char *opt, const char *arg)
+int show_sinks(void *optctx, const char *opt, const char *arg, const OptionDef **options)
 {
     AVOutputFormat *fmt = NULL;
     char *dev = NULL;

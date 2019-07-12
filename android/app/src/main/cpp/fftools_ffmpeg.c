@@ -24,6 +24,11 @@
  */
 
 /*
+ * CHANGES 07.2019
+ * --------------------------------------------------------
+ * - concurrent execution support added
+ * - options const replaced with init_option_definitions() and uninit_option_definitions() methods
+ *
  * CHANGES 08.2018
  * --------------------------------------------------------
  * - fftools_ prefix added to file name and parent headers
@@ -86,9 +91,9 @@
 #include "libavcodec/mathops.h"
 #include "libavformat/os_support.h"
 
-# include "libavfilter/avfilter.h"
-# include "libavfilter/buffersrc.h"
-# include "libavfilter/buffersink.h"
+#include "libavfilter/avfilter.h"
+#include "libavfilter/buffersrc.h"
+#include "libavfilter/buffersink.h"
 
 #if HAVE_SYS_RESOURCE_H
 #include <sys/time.h>
@@ -129,7 +134,7 @@
 const char program_name[] = "ffmpeg";
 const int program_birth_year = 2000;
 
-static FILE *vstats_file;
+static __thread FILE *vstats_file;
 
 const char *const forced_keyframes_const_names[] = {
     "n",
@@ -151,44 +156,47 @@ static BenchmarkTimeStamps get_benchmark_time_stamps(void);
 static int64_t getmaxrss(void);
 static int ifilter_has_all_input_formats(FilterGraph *fg);
 
-static int run_as_daemon  = 0;
-static int nb_frames_dup = 0;
-static unsigned dup_warning = 1000;
-static int nb_frames_drop = 0;
-static int64_t decode_error_stat[2];
+static __thread int run_as_daemon  = 0;
+static __thread int nb_frames_dup = 0;
+static __thread unsigned dup_warning = 1000;
+static __thread int nb_frames_drop = 0;
+static __thread int64_t decode_error_stat[2];
 
-static int want_sdp = 1;
+static __thread int want_sdp = 1;
 
-static BenchmarkTimeStamps current_time;
-AVIOContext *progress_avio = NULL;
+static __thread BenchmarkTimeStamps current_time;
+__thread AVIOContext *progress_avio = NULL;
 
-static uint8_t *subtitle_out;
+static __thread uint8_t *subtitle_out;
 
-InputStream **input_streams = NULL;
-int        nb_input_streams = 0;
-InputFile   **input_files   = NULL;
-int        nb_input_files   = 0;
+__thread InputStream **input_streams = NULL;
+__thread int        nb_input_streams = 0;
+__thread InputFile   **input_files   = NULL;
+__thread int        nb_input_files   = 0;
 
-OutputStream **output_streams = NULL;
-int         nb_output_streams = 0;
-OutputFile   **output_files   = NULL;
-int         nb_output_files   = 0;
+__thread OutputStream **output_streams = NULL;
+__thread int         nb_output_streams = 0;
+__thread OutputFile   **output_files   = NULL;
+__thread int         nb_output_files   = 0;
 
-FilterGraph **filtergraphs;
-int        nb_filtergraphs;
+__thread FilterGraph **filtergraphs;
+__thread int        nb_filtergraphs;
 
 static void (*report_callback)(int, float, float, int64_t, int, double, double) = NULL;
 
 #if HAVE_TERMIOS_H
 
 /* init terminal so that we can grab keys */
-static struct termios oldtty;
-static int restore_tty;
+static __thread struct termios oldtty;
+static __thread int restore_tty;
 #endif
 
 #if HAVE_THREADS
 static void free_input_threads(void);
 #endif
+
+const OptionDef **init_option_definitions();
+void uninit_option_definitions(const OptionDef **options);
 
 /* sub2video hack:
    Convert subtitles to video with alpha to insert them in filter graphs.
@@ -353,12 +361,12 @@ void term_exit(void)
     term_exit_sigsafe();
 }
 
-static volatile int received_sigterm = 0;
-static volatile int received_nb_signals = 0;
-static atomic_int transcode_init_done = ATOMIC_VAR_INIT(0);
-static volatile int ffmpeg_exited = 0;
-static int main_return_code = 0;
-extern int longjmp_value;
+static __thread volatile int received_sigterm = 0;
+static __thread volatile int received_nb_signals = 0;
+static __thread atomic_int transcode_init_done = ATOMIC_VAR_INIT(0);
+static __thread volatile int ffmpeg_exited = 0;
+static __thread int main_return_code = 0;
+extern __thread int longjmp_value;
 
 static void
 sigterm_handler(int sig)
@@ -501,7 +509,7 @@ static int decode_interrupt_cb(void *ctx)
     return received_nb_signals > atomic_load(&transcode_init_done);
 }
 
-const AVIOInterruptCB int_cb = { decode_interrupt_cb, NULL };
+__thread const AVIOInterruptCB int_cb = { decode_interrupt_cb, NULL };
 
 static void ffmpeg_cleanup(int ret)
 {
@@ -4995,6 +5003,8 @@ int execute(int argc, char **argv)
     int i, ret;
     BenchmarkTimeStamps ti;
 
+    const OptionDef **options = init_option_definitions();
+
     int savedCode = setjmp(ex_buf__);
     if (savedCode == 0) {
 
@@ -5024,7 +5034,7 @@ int execute(int argc, char **argv)
         show_banner(argc, argv, options);
 
         /* parse options and open all input/output files */
-        ret = ffmpeg_parse_options(argc, argv);
+        ret = ffmpeg_parse_options(argc, argv, options);
         if (ret < 0)
             exit_program(1);
 
@@ -5068,6 +5078,8 @@ int execute(int argc, char **argv)
     } else {
         main_return_code = longjmp_value;
     }
+
+    uninit_option_definitions(options);
 
     return main_return_code;
 }

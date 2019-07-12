@@ -17,6 +17,10 @@
  */
 
 /*
+ * CHANGES 07.2019
+ * --------------------------------------------------------
+ * - concurrent execution support added
+ *
  * CHANGES 03.2019
  * --------------------------------------------------------
  * - config.h include removed
@@ -578,62 +582,62 @@ typedef struct OutputFile {
     int header_written;
 } OutputFile;
 
-extern InputStream **input_streams;
-extern int        nb_input_streams;
-extern InputFile   **input_files;
-extern int        nb_input_files;
+extern __thread InputStream **input_streams;
+extern __thread int        nb_input_streams;
+extern __thread InputFile   **input_files;
+extern __thread int        nb_input_files;
 
-extern OutputStream **output_streams;
-extern int         nb_output_streams;
-extern OutputFile   **output_files;
-extern int         nb_output_files;
+extern __thread OutputStream **output_streams;
+extern __thread int         nb_output_streams;
+extern __thread OutputFile   **output_files;
+extern __thread int         nb_output_files;
 
-extern FilterGraph **filtergraphs;
-extern int        nb_filtergraphs;
+extern __thread FilterGraph **filtergraphs;
+extern __thread int        nb_filtergraphs;
 
-extern char *vstats_filename;
-extern char *sdp_filename;
+extern __thread char *vstats_filename;
+extern __thread char *sdp_filename;
 
-extern float audio_drift_threshold;
-extern float dts_delta_threshold;
-extern float dts_error_threshold;
+extern __thread float audio_drift_threshold;
+extern __thread float dts_delta_threshold;
+extern __thread float dts_error_threshold;
 
-extern int audio_volume;
-extern int audio_sync_method;
-extern int video_sync_method;
-extern float frame_drop_threshold;
-extern int do_benchmark;
-extern int do_benchmark_all;
-extern int do_deinterlace;
-extern int do_hex_dump;
-extern int do_pkt_dump;
-extern int copy_ts;
-extern int start_at_zero;
-extern int copy_tb;
-extern int debug_ts;
-extern int exit_on_error;
-extern int abort_on_flags;
-extern int print_stats;
-extern int qp_hist;
-extern int stdin_interaction;
-extern int frame_bits_per_raw_sample;
-extern AVIOContext *progress_avio;
-extern float max_error_rate;
-extern char *videotoolbox_pixfmt;
+extern __thread int audio_volume;
+extern __thread int audio_sync_method;
+extern __thread int video_sync_method;
+extern __thread float frame_drop_threshold;
+extern __thread int do_benchmark;
+extern __thread int do_benchmark_all;
+extern __thread int do_deinterlace;
+extern __thread int do_hex_dump;
+extern __thread int do_pkt_dump;
+extern __thread int copy_ts;
+extern __thread int start_at_zero;
+extern __thread int copy_tb;
+extern __thread int debug_ts;
+extern __thread int exit_on_error;
+extern __thread int abort_on_flags;
+extern __thread int print_stats;
+extern __thread int qp_hist;
+extern __thread int stdin_interaction;
+extern __thread int frame_bits_per_raw_sample;
+extern __thread AVIOContext *progress_avio;
+extern __thread float max_error_rate;
+extern __thread char *videotoolbox_pixfmt;
 
-extern int filter_nbthreads;
-extern int filter_complex_nbthreads;
-extern int vstats_version;
+extern __thread int filter_nbthreads;
+extern __thread int filter_complex_nbthreads;
+extern __thread int vstats_version;
 
-extern const AVIOInterruptCB int_cb;
+extern __thread const AVIOInterruptCB int_cb;
 
-extern const OptionDef options[];
-extern const HWAccel hwaccels[];
-extern AVBufferRef *hw_device_ctx;
+extern const OptionDef **init_option_definitions();
+extern __thread const HWAccel hwaccels[];
+extern __thread AVBufferRef *hw_device_ctx;
 #if CONFIG_QSV
-extern char *qsv_device;
+extern __thread char *qsv_device;
 #endif
-extern HWDevice *filter_hw_device;
+extern __thread HWDevice *filter_hw_device;
 
 
 void term_init(void);
@@ -664,7 +668,7 @@ void sub2video_update(InputStream *ist, AVSubtitle *sub);
 
 int ifilter_parameters_from_frame(InputFilter *ifilter, const AVFrame *frame);
 
-int ffmpeg_parse_options(int argc, char **argv);
+int ffmpeg_parse_options(int argc, char **argv, const OptionDef **options);
 
 int videotoolbox_init(AVCodecContext *s);
 int qsv_init(AVCodecContext *s);
